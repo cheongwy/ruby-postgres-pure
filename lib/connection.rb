@@ -1,6 +1,7 @@
 require 'binary_converter'
 require 'connection_parser'
 require 'message_generator'
+require 'auth_handler'
 require 'result'
 require 'error'
 require 'digest/md5'
@@ -11,6 +12,7 @@ module Pg
     include BinaryConverter
     include ConnectionParser
     include MessageGenerator
+    include AuthHandler
     
     attr_reader :db, :user, :host, :port
     
@@ -44,6 +46,14 @@ module Pg
       
     end
     
+    #async_exec(sql [, params, result_format ] ) → PG::Result 
+    #async_exec(sql [, params, result_format ] ) {|pg_result| block } 
+    #This function has the same behavior as exec, except that it’s implemented using asynchronous command processing 
+    #in order to allow other threads to process while waiting for the server to complete the request.
+    
+    #async_query(*args)
+    #Alias for: async_exec
+    
     #
     # Get the pid of the backend process
     #
@@ -52,7 +62,7 @@ module Pg
     end
     
     #
-    #
+    # 
     #
     def cancel
       raise "No process id and secret key available to perform cancellation" if @pid.nil? || @secret.nil?
@@ -60,6 +70,7 @@ module Pg
     
     def close
       unless @socket.nil?
+        puts "Closing connection"
         @socket.write("X#{b_int32(4)}")
         @socket.close()
         @closed = true
@@ -67,7 +78,7 @@ module Pg
     end
     
     def closed?
-      @close
+      @closed == true
     end
     
     #
@@ -76,22 +87,7 @@ module Pg
     def exec(sql)
       execute_query {
         @socket.write(plain_sql_message(sql))
-        
-        code = @socket.recv(1)
-        #puts "Query response #{code}"
-        case code
-        when 'T'
-          return parse_row_description()
-        when 'C'
-          return command_completed()
-        when 'I'
-          return empty_query_response()
-        when 'E'
-          return parse_error_response()
-        else
-          raise "Unknown/Not implemented response code #{code}"
-        end
-        
+        process_query_response()
       }
     end
     
@@ -155,8 +151,8 @@ module Pg
       @parameter_status[param_name] unless @parameter_status.nil? 
     end
     
-    def prepare(name, sql)
-      @socket.write(parse_message(name, sql))
+    def prepare(name, sql, param_type_oids=[])
+      @socket.write(parse_message(name, sql, param_type_oids))
       @socket.write(sync_message())
       
       code = @socket.recv(1)
@@ -190,123 +186,106 @@ module Pg
       @host = hostname
       @db = dbname
       @port = port  
+      @user = user
       #@socket = UNIXSocket.new("/tmp/.s.PGSQL.5432")
       @socket = TCPSocket.open(hostname, port)
-      do_auth(user, password, dbname)
-      
-      @user = user
-    end
-    
-    def do_auth(user, password, dbname)
-      
-      @socket.write(startup_message(user,dbname))
-      auth_code = @socket.recv(1)
-      
-      if(auth_code == 'R')
-        length = int32(@socket.recv(4))
-        res_code = int32(@socket.recv(4))
-        handle_auth(length, res_code, user, password)
-        
-        auth_response = @socket.recv(1)
-        puts "Auth response #{auth_response}"
-        if(auth_response == 'R')
-          res_len = int32(@socket.recv(4))
-          res_code = int32(@socket.recv(4))
-          raise "Unknown response code #{res_code}. Was expecting (0) for AuthenticationOk" unless res_code == 0
-          
-          parse_status_params_and_wait_ready_for_query()
-        elsif(auth_response == 'E')
-          parse_error_response()
-        else
-          raise "Unknown authentication response code #{auth_rsponse}"
-        end
-      elsif(auth_code == 'E')
-        puts "handling error #{auth_code}"
-        parse_error_response()
-      else
-        raise "Unknown authentication response code #{auth_code}"
+      begin
+        do_auth(user, password, dbname)
+      rescue Exception => e
+        close()
+        raise e
       end
       
     end
     
-    def startup_message(user, database)
-      body = "#{b_int16(3)}#{b_int16(0)}#{c_str('user')}#{c_str(user)}#{c_str('database')}#{c_str(database)}#{c_str('')}"
-      length = b_int32(body.length+4)
-      "#{length}#{body}"
-    end
-    
     def execute_query(&block)
+      #puts "Executing query #{@query_ready}"
       if @query_ready
         @query_ready = false
         yield
       else
+        #next_response()
         raise "Connection is not ready!! This should not happen!!"  
       end        
     end
+    
+    def process_query_response
+      code = @socket.recv(1)
+      puts "Query response #{code}"
+      case code
+      when 'C'
+        return command_completed()
+      # TO BE IMPLEMENTED
+      # CopyInResponse & CopyOutResponse    
+      when 'T'
+        return parse_row_description()
+      when 'I'
+        return empty_query_response()
+      when 'E'
+        return parse_error_response()
+      when 'Z'
+        process_ready_for_query()          
+      when 'N'
+        return process_notification_response()
+      else
+        raise "Unknown/Not implemented response code #{code}"
+      end
+      
+    end
+    
+    def process_ready_for_query()
+      length = int32(@socket.recv(4))
+      status  = @socket.recv(1)
+      raise "Unknown transaction status #{status}" unless ['I', 'T', 'E'].include?(status)
+      puts "Transaction status #{status}"
+      @query_ready = true
+    end         
     
     def parse_error_response()
 
       len = int32(@socket.recv(4))
       err = @socket.recv(len)
       arr = err.split(/\x0/)
-      Result.new({ :error => Error.new(arr) })
-      # need a better way to handle this   
-      raise Error.new(arr)
-      #raise "Error while connecting to postgres #{err_code} => #{err_msg}"  
-    end
-    
-    def handle_auth(length, code, user, password)
+      query_ready_code = arr[arr.size-1]
       
-      auth_name = @@auth_types.select { |type, values |
-        (values[:code] == code && values[:length] == length)
-      }
-      #puts "auth_name #{auth_name[0][0]}"
-      begin
-        self.send("do_#{auth_name[0][0].to_s}".to_sym, user, password)
-      rescue NoMethodError
-        puts "Unsupported authentication #{auth_name}"
-        close()
-      end
+      puts "Query error response #{err}"
+      puts "Query ready code #{query_ready_code}"
+      raise Error.new("Unexpected error. Query error not followed by query ready") unless query_ready_code == 'Z'
+      
+      # Don't understand why we need to consume 2 more bytes to get the transaction status
+      tstatus = @socket.recv(2)
+      puts "Transation status after error #{tstatus}"
+      @query_ready = true
+      raise Error.new(arr)
     end
     
-    def do_md5(username, password)
-      salt = @socket.recv(4)
-      @socket.write(md5_auth_message(username, password, salt))            
-    end
-    
-    def do_cleartext(username, password)
-      @socket.write(cleartext_auth_message(username, password))                  
-    end
+    def process_notification_response
+      len = int32(@socket.recv(4))
+      notices = @socket.recv(len-4)
+      arr = notices.split(/\x0/)
+      puts arr.join(' ')
+      process_query_response()
+    end    
     
     def parse_status_params_and_wait_ready_for_query()
       code = @socket.recv(1)
-      #puts "Status param code #{code}"
-      if(code == 'S')
-        process_parameter_status()
-      elsif(code == 'K')
-        process_backend_key_data()  
-      elsif(code == 'Z')
+      puts "Status param code #{code}"
+      case code
+      when 'T'
+        parse_row_description()                
+      when 'Z'
         process_ready_for_query()
-      elsif(code == 'N')  
+      when 'N'  
         process_notification_response()
-      elsif(code == 'I')
+      when 'I'
         empty_query_response()
+      when 'E'
+        parse_error_response()
+      else
+        raise "Unknown response code #{code}"
       end
     end
     
-    def process_backend_key_data()
-      length = int32(@socket.recv(4))
-      @pid = int32(@socket.recv(4))
-      @secret = int32(@socket.recv(4))
-      parse_status_params_and_wait_ready_for_query()
-    end
-    
-    def process_ready_for_query()
-      length = int32(@socket.recv(4))
-      status  = @socket.recv(1)
-      puts "Ready for query status #{status}"
-      @query_ready = true   
-    end
     
     def parse_row_description()
       length = int32(@socket.recv(4))
@@ -317,8 +296,11 @@ module Pg
       if(next_code == 'D')
         result = { :fields => fields, :rows => [] }
         return parse_data_row(result, 0)
+      elsif(next_code == 'E')
+        return parse_error_response()
       end
     end
+    
     
     def parse_field_descriptions
       field_count = int16(@socket.recv(2))
@@ -365,7 +347,8 @@ module Pg
         status = command_completed()
         puts "Final row count #{row_count}"
         result[:cmd_status] = status
-        result[:cmd_rows] = row_count+1  
+        result[:cmd_rows] = row_count+1
+        #puts "result #{result[:rows]}"
         return Result.new(result)
       elsif(next_code == 'D') 
         row_count += 1
@@ -382,32 +365,12 @@ module Pg
       res    
     end
     
+    
     def empty_query_response
       #puts "Got empty query"
       consume_empty_response_and_wait_ready_for_query()
     end
     
-    def process_notification_response
-      len = int32(@socket.recv(4))
-      notices = @socket.recv(len-4)
-      arr = notices.split(/\x0/)
-      puts arr.join(' ')
-      parse_status_params_and_wait_ready_for_query
-    end
-    
-    def process_parameter_status
-      len = int32(@socket.recv(4))
-      status = @socket.recv(len-4)
-      
-      status.unpack('A*').each { |s|
-        pair = s.split(/\x0/)
-        val = pair[1].nil? ? '' : pair[1].strip
-        #puts "#{pair[0]} => #{val}"
-        @parameter_status[pair[0].strip] = val 
-      }
-       
-      parse_status_params_and_wait_ready_for_query()
-    end
     
     def portal_suspended_response
       consume_empty_response_and_wait_ready_for_query()
@@ -417,11 +380,30 @@ module Pg
       #puts 'No data'
       consume_empty_response_and_wait_ready_for_query()
     end
-    
     def consume_empty_response_and_wait_ready_for_query()
       @socket.recv(4)
       parse_status_params_and_wait_ready_for_query()
     end
+    
+
+#    def next_response
+#      code = @socket.recv(1)
+#      puts "Next #{code}"
+#      case code
+#      when 'Z'
+#        process_ready_for_query()
+#      when 'N'  
+#        process_notification_response()
+#      when 'I'
+#        empty_query_response()
+#      when 'T'
+#        parse_row_description()                
+#      when 'E'
+#        parse_error_response()
+#      else
+#        raise "Unknown response code #{code}"
+#      end      
+#    end        
     
   end
   

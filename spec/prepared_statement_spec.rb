@@ -5,7 +5,7 @@ describe "Postgres Connection Prepared Statement" do
 
   before(:all) do
     @host = 'localhost'
-    @port = 1234
+    @port = 5432
     @dbname = 'postgres'
     @user = 'postgres'
     @password = 'postgres'
@@ -17,22 +17,58 @@ describe "Postgres Connection Prepared Statement" do
       conn = standard_connection()
       name = 'mystmt'
       conn.prepare(name, 'SELECT $1::varchar from information_schema.tables')
-      #conn.exec_prepared(name, [ { :value => 'table_schema', :format => 0} ])
-      #puts "Done"
     ensure
       conn.close unless conn.nil?
     end  
   end
+  
+  it "should be able to prepare a statement with param types" do
+    
+    begin
+      conn = standard_connection()
+      name = 'mystmt'
+      conn.prepare(name, 'SELECT $1 from information_schema.tables', [1043])
+    ensure
+      conn.close unless conn.nil?
+    end  
+  end  
+  
+  it "should be able to handle prepared statement syntax error" do
+    
+    begin
+      conn = standard_connection()
+      name = 'mystmt'
+      expect {
+        conn.prepare(name, 'SELECT $1::varchar information_schema.tables')
+      }.to raise_error(Pg::Error)
+    ensure
+      conn.close unless conn.nil?
+    end  
+  end  
+  
+  it "should be able to handle prepared statement error" do
+    
+    begin
+      conn = standard_connection()
+      name = 'mystmt'
+      expect {
+        conn.prepare(name, 'SELECT $1::varchar from non_existent_table')
+      }.to raise_error(Pg::Error)
+    ensure
+      conn.close unless conn.nil?
+    end  
+  end    
   
   it "should be able to execute a prepared statement" do
     
     begin
       conn = standard_connection()
       name = 'mystmt'
-      conn.prepare(name, 'SELECT $1::varchar from information_schema.tables')
+      conn.prepare(name, "SELECT $1::varchar from information_schema.tables where table_schema='information_schema'")
       result = conn.exec_prepared(name, [ { :value => 'table_schema', :format => 0} ])
-      table_schema = result.field_values('table_schema')
-      table_schema.size.should == 135  
+      values = result.values()
+      values.size.should == 61 #135
+      values[0][0].should == 'table_schema'  
     ensure
       conn.close unless conn.nil?
     end  
@@ -45,7 +81,6 @@ describe "Postgres Connection Prepared Statement" do
       name = 'empty'
       conn.prepare(name, '')
       conn.exec_prepared(name)
-      puts "Done"
     ensure
       conn.close unless conn.nil?
     end  

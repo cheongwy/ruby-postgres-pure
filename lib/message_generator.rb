@@ -1,3 +1,5 @@
+require 'binary_converter'
+
 module Pg
   
   module MessageGenerator
@@ -19,8 +21,16 @@ module Pg
       message('Q', c_str(sql))
     end
     
-    def parse_message(name, query)
-      body = "#{c_str(name)}#{c_str(query)}#{b_int16(0)}"
+    def parse_message(name, query, param_oids=[])
+      params_size = param_oids.size
+      body = "#{c_str(name)}#{c_str(query)}#{b_int16(params_size)}"
+      unless(param_oids.nil?)
+        oids = ""
+        param_oids.each { |oid|
+          oids += b_int32(oid)
+        }
+        body = body + oids
+      end
       message('P', body)
     end
     
