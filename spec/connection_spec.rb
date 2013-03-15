@@ -59,6 +59,18 @@ describe "Postgres Connection" do
     }
   end
   
+  it "should be able to return the correct finished status" do
+    
+    begin
+      conn = standard_connection()
+      conn.finished?.should == false
+      conn.close()
+      conn.finished?.should == true
+    ensure
+      conn.close unless conn.nil? || conn.closed?
+    end  
+  end  
+  
   def standard_connection
     Pg::Connection.new(@host, @port, nil, nil, @dbname, @user, @password)
   end

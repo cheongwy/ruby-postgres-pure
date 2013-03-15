@@ -157,7 +157,8 @@ module Pg
     end
      
     def nparams
-      raise NotImplementedError("Not implemented yet")
+      @result[:fields].size
+      #raise NotImplementedError("Not implemented yet")
     end
     
     def ntuples

@@ -4,7 +4,8 @@ require 'message_generator'
 require 'auth_handler'
 require 'result'
 require 'error'
-require 'digest/md5'
+require 'char_set'
+require 'socket'
 
 module Pg
   
@@ -25,15 +26,18 @@ module Pg
     #connection_str_or_hash_or_multi
     def initialize(*params)
       @parameter_status = {}
+      @conn_params = params  
         
       return open(nil, nil, nil, nil, nil, nil, nil) if params.nil? or params.size == 0
         
       if params.size == 1
         if params[0].is_a?(String)
           p = parse_as_string(params[0])
+          @conn_params = p
           open(p[0], p[1], p[2], p[3], p[4], p[5], p[6])
         elsif params[0].is_a?(Hash)
           p = parse_as_hash(params[0])
+          @conn_params = p
           open(p[0], p[1], p[2], p[3], p[4], p[5], p[6])
         else
           raise ArgumentError.new("Invalid arguments")   
@@ -58,6 +62,8 @@ module Pg
     # Get the pid of the backend process
     #
     def backend_pid
+      # This should not happen. pid should have been set in auth_handler - process_backend_key_data
+      raise "No PID for backend" if @pid.nil? 
       @pid
     end
     
@@ -66,10 +72,21 @@ module Pg
     #
     def cancel
       raise "No process id and secret key available to perform cancellation" if @pid.nil? || @secret.nil?
+      p = @conn_params
+      begin
+        conn = Pg::Connection.new(p[0], p[1], p[2], p[3], p[4], p[5], p[6])
+        puts "Cancelling request with pid #{@pid} and secret #{@secret}"
+        conn.cancel_message(@pid, @secret)
+      ensure
+        conn.close() unless conn.nil?
+      end
     end
     
+    # client_encoding=(p1)
+    # Alias for: set_client_encoding
+    
     def close
-      unless @socket.nil?
+      unless @socket.nil? || closed?
         puts "Closing connection"
         @socket.write("X#{b_int32(4)}")
         @socket.close()
@@ -81,56 +98,47 @@ module Pg
       @closed == true
     end
     
+    def describe_portal(portal_name)
+      describe_portal_message(portal_name)
+      @socket.write(sync_message())
+      process_query_response()
+    end
+    
+    def describe_prepared(stmt_name)
+      @socket.write(describe_prepared_message(stmt_name))
+      @socket.write(sync_message())
+      process_query_response()
+    end
+    
+    def error_message
+      @error && @error.message
+    end
+    
+    # TODO implement escape methods?
+    
     #
-    # Sends SQL query request specified by sql to backend
+    # Sends SQL query request specified by sql to PostgreSQL. 
+    # Returns a PG::Result instance on success. On failure, it raises a PG::Error.
     #
-    def exec(sql)
-      execute_query {
+    def exec(sql, &block)
+      result = execute_query {
         @socket.write(plain_sql_message(sql))
         process_query_response()
       }
-    end
+      block.nil? ? result : yield(result)
+    end    
     
     #
+    # Execute prepared named statement specified by statement_name. 
+    # Returns a PG::Result instance on success. On failure, it raises a PG::Error.
     #
-    #
-    def exec_prepared(stmt_name, params = [])
-      execute_query {
-        @socket.write(bind_message(stmt_name, params))
-        #@socket.write(flush_message())
-  #      code = @socket.recv(1)
-  #      puts "Bind response code #{code}"      
-        
-        @socket.write(describe_portal())
-        #puts "Executing query"
-        @socket.write(execute_message())
-        # only sync after sending execute msg  
-        @socket.write(sync_message())
-        
-        code = @socket.recv(1)
-        puts "Bind response code #{code}"
-        len = @socket.recv(4)
-        
-        parse_error_response() if(code == 'E')
-        raise "Prepared Statement Bind Error" unless code.to_i == 2
-        
-        code = @socket.recv(1)
-        puts "Code after exec #{code}"
-        case code
-        when 'C'
-          return command_completed()
-        when 'T'
-          return parse_row_description()
-        when 'n'
-          return no_data()        
-        when 's'
-          return portal_suspended_response()
-        when 'E'
-          return parse_error_response()
-        else
-          raise "Unknown/Not implemented response code of #{code}"
-        end      
-      }
+    def exec_prepared(stmt_name, params = [], &block)
+      result = exec_prepared_statement(stmt_name, params)
+      block.nil? ? result : yield(result) 
+    end
+    
+    def external_encoding
+      CharSet.pg_to_ruby(@parameter_status['server_encoding'])
     end
     
     #
@@ -145,6 +153,20 @@ module Pg
     #
     def finished?
       closed?
+    end
+    
+    def flush
+      # How to implement this?
+      # This feels more like flushing of the client socket
+      # than sending the flush command to the server
+      # Always return true for now
+#      @socket.write(flush_message())
+#      process_query_response()
+      true
+    end
+    
+    def get_client_encoding
+      @parameter_status['client_encoding']
     end
     
     def parameter_status(param_name)
@@ -209,6 +231,45 @@ module Pg
       end        
     end
     
+    def exec_prepared_statement(stmt_name, params = [])
+      execute_query {
+        @socket.write(bind_message(stmt_name, params))
+        #@socket.write(flush_message())
+  #      code = @socket.recv(1)
+  #      puts "Bind response code #{code}"      
+        
+        @socket.write(describe_portal_message())
+        #puts "Executing query"
+        @socket.write(execute_message())
+        # only sync after sending execute msg  
+        @socket.write(sync_message())
+        
+        code = @socket.recv(1)
+        puts "Bind response code #{code}"
+        len = @socket.recv(4)
+        
+        parse_error_response() if(code == 'E')
+        raise "Prepared Statement Bind Error" unless code.to_i == 2
+        
+        code = @socket.recv(1)
+        puts "Code after exec #{code}"
+        case code
+        when 'C'
+          return command_completed()
+        when 'T'
+          return parse_row_description()
+        when 'n'
+          return no_data()        
+        when 's'
+          return portal_suspended_response()
+        when 'E'
+          return parse_error_response()
+        else
+          raise "Unknown/Not implemented response code of #{code}"
+        end      
+      }      
+    end
+    
     def process_query_response
       code = @socket.recv(1)
       puts "Query response #{code}"
@@ -227,7 +288,10 @@ module Pg
         process_ready_for_query()          
       when 'N'
         return process_notification_response()
+      when 't'
+        return parameter_description_response()  
       else
+        close()
         raise "Unknown/Not implemented response code #{code}"
       end
       
@@ -256,7 +320,8 @@ module Pg
       tstatus = @socket.recv(2)
       puts "Transation status after error #{tstatus}"
       @query_ready = true
-      raise Error.new(arr)
+      @error = Error.new(arr)
+      raise @error
     end
     
     def process_notification_response
@@ -286,21 +351,21 @@ module Pg
       end
     end
     
-    
     def parse_row_description()
       length = int32(@socket.recv(4))
       fields = parse_field_descriptions()
       
       next_code = @socket.recv(1)
-      #puts "Next code #{next_code}"
+      puts "Next code for row #{next_code}"
       if(next_code == 'D')
         result = { :fields => fields, :rows => [] }
         return parse_data_row(result, 0)
       elsif(next_code == 'E')
         return parse_error_response()
+      elsif(next_code == 'Z')
+        return Result.new({ :fields => fields, :rows => [] })
       end
     end
-    
     
     def parse_field_descriptions
       field_count = int16(@socket.recv(2))
@@ -365,21 +430,42 @@ module Pg
       res    
     end
     
-    
     def empty_query_response
       #puts "Got empty query"
       consume_empty_response_and_wait_ready_for_query()
     end
     
-    
     def portal_suspended_response
       consume_empty_response_and_wait_ready_for_query()
+    end
+    
+    def parameter_description_response
+      length = int32(@socket.recv(4))
+      param_count = int16(@socket.recv(2))
+      if(param_count > 0)
+        oids = [] 
+        [0..param_count].each {
+          oids.push(int32(@socket.recv(4)))
+        }
+      end
+      
+      code = @socket.recv(1)
+      case code
+      when 'n'
+        no_data()
+        return Result.new({ :fields => [], :rows => []})
+      when 'T'
+        return parse_row_description()  
+      end
+              
+      raise "Unexpected code after parameter description #{code}"
     end
     
     def no_data
       #puts 'No data'
       consume_empty_response_and_wait_ready_for_query()
     end
+
     def consume_empty_response_and_wait_ready_for_query()
       @socket.recv(4)
       parse_status_params_and_wait_ready_for_query()

@@ -1,4 +1,5 @@
 require 'binary_converter'
+require 'digest/md5'
 
 module Pg
   
@@ -59,9 +60,13 @@ module Pg
       message('B', body)
     end
     
-    def describe_portal
-      message('D', "P#{c_str('')}")
+    def describe_portal_message(name='')
+      message('D', "P#{c_str(name)}")
     end
+    
+    def describe_prepared_message(name='')
+      message('D', "S#{c_str(name)}")
+    end    
     
     def execute_message(limit=0)
       body = "#{c_str('')}#{b_int32(limit)}"
@@ -84,6 +89,11 @@ module Pg
     
     def flush_message
       message('H', '')
+    end
+    
+    def cancel_message(pid, secret)
+      body = "#{b_int32(80877102)}#{b_int32(pid)}#{b_int32(secret)}"
+      message('', body)
     end
         
     private

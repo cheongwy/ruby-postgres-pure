@@ -131,6 +131,38 @@ describe "Postgres Connection" do
 #    result.error_field('*').should == nil
   end
   
+  it "should be able to execute query with a block" do
+    
+    begin
+      conn = standard_connection
+      block_result = conn.exec("select 1 as num") { |result|
+        result.should_not == nil
+        result.nfields.should == 1
+        # The returned type of String is correct
+        # Checked with original pg lib
+        result.getvalue(0,0).should == "1"
+        result.getvalue(0,0)
+      }
+      
+      block_result.should == "1"
+    ensure
+      conn.close unless conn.nil?
+    end  
+  end
+  
+  it "should be able to handle errors when executing query with a block" do
+    
+    begin
+      conn = standard_connection
+      expect {
+        conn.exec("select") { |result|
+        }
+      }.to raise_error(Pg::Error)
+      
+    ensure
+      conn.close unless conn.nil?
+    end  
+  end  
   
   def standard_connection
     Pg::Connection.new(@host, @port, nil, nil, @dbname, @user, @password)
