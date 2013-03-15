@@ -33,14 +33,15 @@ module Pg
     private
     def send_auth_credentials(length, code, user, password)
       raise "AuthHandler needs a socket to function correctly" if @socket.nil?
-      
+
       auth_name = AUTH_TYPES.select { |type, values |
         (values[:code] == code && values[:length] == length)
       }
-      #puts "auth_name #{auth_name[0][0]}"
+      #puts "auth_name #{auth_name.keys[0]}"
       begin
-        self.send("do_#{auth_name[0][0].to_s}".to_sym, user, password)
+        self.send("do_#{auth_name.keys[0].to_s}".to_sym, user, password)
       rescue NoMethodError
+        close()
         raise "Unsupported authentication #{auth_name[0][0]}"
       end
     end
