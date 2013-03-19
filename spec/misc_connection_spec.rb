@@ -74,6 +74,72 @@ describe "Postgres Connection" do
     end  
   end  
   
+  it "should be able to return basic params" do
+    
+    begin
+      conn = Pg::Connection.new(@host, @port, {:test=>true}, nil, @dbname, @user, @password)
+      conn.options[:test].should == true
+      conn.host.should == @host
+      conn.port.should == @port
+      conn.user.should == @user
+      conn.pass.should == @user  
+    ensure
+      conn.close unless conn.nil?
+    end  
+  end  
+  
+  it "should be able to reset the connection" do
+    
+    begin
+      conn = standard_connection()
+      conn.reset()
+      conn.closed?.should == false
+    ensure
+      conn.close unless conn.nil?
+    end  
+  end  
+  
+  it "should be able to get the server version" do
+    
+    begin
+      conn = standard_connection()
+      conn.server_version.should_not == nil
+      conn.server_version.should_not == ''
+    ensure
+      conn.close unless conn.nil?
+    end  
+  end
+  
+  it "should be able to get and set the client encoding" do
+    
+    begin
+      conn = standard_connection()
+      conn.set_client_encoding('SQL_ASCII')
+      conn.get_client_encoding.should.to_s == 'SQL_ASCII' 
+    ensure
+      conn.close unless conn.nil?
+    end  
+  end  
+  
+  it "should be able to set the default encoding" do
+    
+    begin
+      conn = standard_connection()
+      def_enc = conn.set_default_encoding
+      conn.get_client_encoding.should.to_s == nil
+      def_enc.should == nil
+      
+      # Set Ruby's default encoding and then test again
+      Encoding.default_internal = Encoding::UTF_8
+      def_enc = conn.set_default_encoding
+      def_enc.should_not == nil
+      def_enc.to_s == 'UTF-8'
+      conn.get_client_encoding.should.to_s == 'UTF-8'
+    ensure
+      conn.close unless conn.nil?
+    end  
+  end  
+  
   def standard_connection
     Pg::Connection.new(@host, @port, nil, nil, @dbname, @user, @password)
   end      

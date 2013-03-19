@@ -16,6 +16,11 @@ module CharSet
     end
   end
   
+  def self.ruby_to_pg(encoding)
+    encoding_name = encoding.to_s
+    @@map[encoding_name] || encoding_name.gsub!('-', '_')
+  end  
+  
   
   
 end

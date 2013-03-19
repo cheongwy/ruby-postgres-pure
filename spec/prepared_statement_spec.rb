@@ -16,7 +16,10 @@ describe "Postgres Connection Prepared Statement" do
     begin
       conn = standard_connection()
       name = 'mystmt'
-      conn.prepare(name, 'SELECT $1::varchar from information_schema.tables')
+      result = conn.prepare(name, 'SELECT $1::varchar from information_schema.tables')
+      result.is_a?(Pg::Result).should == true
+      result.nparams.should == 0
+      result.fields.size.should == 0
     ensure
       conn.close unless conn.nil?
     end  

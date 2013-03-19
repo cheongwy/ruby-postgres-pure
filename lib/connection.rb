@@ -15,13 +15,7 @@ module Pg
     include MessageGenerator
     include AuthHandler
     
-    attr_reader :db, :user, :host, :port
-    
-    @@auth_types = { 
-      :kerberos => { :length => 8, :code => 2 },
-      :clear => { :length => 8, :code => 3 },
-      :md5 => { :length => 12, :code => 5 }
-    }    
+    attr_reader :db, :user, :host, :port, :options
     
     #connection_str_or_hash_or_multi
     def initialize(*params)
@@ -127,7 +121,8 @@ module Pg
       }
       block.nil? ? result : yield(result)
     end    
-    
+    alias_method :query, :exec  
+
     #
     # Execute prepared named statement specified by statement_name. 
     # Returns a PG::Result instance on success. On failure, it raises a PG::Error.
@@ -166,7 +161,24 @@ module Pg
     end
     
     def get_client_encoding
-      @parameter_status['client_encoding']
+      @client_encoding
+    end
+    
+    # get_result() → PG::Result 
+    # get_result() {|pg_result| block } 
+    
+    # Returns:
+    # an Encoding - client_encoding of the connection as a Ruby Encoding object.
+    # nil - the client_encoding is ‘SQL_ASCII’
+    def internal_encoding
+      get_client_encoding unless @parameter_status['client_encoding'] == 'SQL_ASCII'
+    end
+    
+    # internal_encoding = value 
+    # A wrapper of set_client_encoding.
+    
+    def pass
+      @user
     end
     
     def parameter_status(param_name)
@@ -182,8 +194,37 @@ module Pg
       parse_error_response() if(code == 'E')
       
       len = @socket.recv(4)
-      raise "Prepared Statement Parse Error" unless code.to_i == 1
+      raise "Prepared Statement Parse Error" unless code.to_i == 1 # Code for parse complete is 1
       parse_status_params_and_wait_ready_for_query()
+      Result.new({:fields => []})
+    end
+    
+    def protocol_versio
+      3
+    end
+    
+    def reset
+      close
+      p = @conn_params
+      open(p[0], p[1], p[2], p[3], p[4], p[5], p[6])
+    end
+    
+    def server_version
+      @parameter_status['server_version']
+    end
+    
+    def set_client_encoding(encoding)
+      begin
+        @client_encoding = CharSet.pg_to_ruby(encoding)
+      rescue ArgumentError => e
+        raise Error.new('invalid encoding name')
+      end
+    end
+    alias_method :client_encoding=, :set_client_encoding
+    
+    def set_default_encoding()
+      default_enc = Encoding.default_internal
+      @client_encoding = CharSet.ruby_to_pg(default_enc) unless default_enc.nil?
     end
     
     def transaction_status
@@ -209,10 +250,13 @@ module Pg
       @db = dbname
       @port = port  
       @user = user
+      @options = options
       #@socket = UNIXSocket.new("/tmp/.s.PGSQL.5432")
+      @closed = false
       @socket = TCPSocket.open(hostname, port)
       begin
         do_auth(user, password, dbname)
+        @client_encoding = CharSet.pg_to_ruby(@parameter_status['client_encoding'])
       rescue Exception => e
         close()
         raise e
@@ -314,11 +358,18 @@ module Pg
       
       puts "Query error response #{err}"
       puts "Query ready code #{query_ready_code}"
-      raise Error.new("Unexpected error. Query error not followed by query ready") unless query_ready_code == 'Z'
+      unless query_ready_code == 'Z'
+        begin
+          read = @socket.recv(0)
+          puts "Read after error #{read}"
+        rescue Exception => e
+          raise Error.new(err)
+        end
+      end
       
       # Don't understand why we need to consume 2 more bytes to get the transaction status
       tstatus = @socket.recv(2)
-      puts "Transation status after error #{tstatus}"
+      puts "Transaction status after error #{tstatus}"
       @query_ready = true
       @error = Error.new(arr)
       raise @error
