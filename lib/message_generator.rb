@@ -96,6 +96,19 @@ module Pg
       message('', body)
     end
         
+    def copy_data_message(data='')
+      # data does not need to be convereted by c_str
+      message('d', data)
+    end
+    
+    def copy_done_message()
+      message('c', '')
+    end
+    
+    def copy_fail_message(cause='')
+      message('f', c_str(cause))
+    end    
+    
     private
     
     def message(code, body)

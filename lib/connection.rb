@@ -20,7 +20,9 @@ module Pg
     #connection_str_or_hash_or_multi
     def initialize(*params)
       @parameter_status = {}
-      @conn_params = params  
+      @conn_params = params
+      @copying = false
+      @copy_data = []  
         
       return open(nil, nil, nil, nil, nil, nil, nil) if params.nil? or params.size == 0
         
@@ -94,13 +96,13 @@ module Pg
     
     def describe_portal(portal_name)
       describe_portal_message(portal_name)
-      @socket.write(sync_message())
+      write(sync_message())
       process_query_response()
     end
     
     def describe_prepared(stmt_name)
-      @socket.write(describe_prepared_message(stmt_name))
-      @socket.write(sync_message())
+      write(describe_prepared_message(stmt_name))
+      write(sync_message())
       process_query_response()
     end
     
@@ -116,7 +118,7 @@ module Pg
     #
     def exec(sql, &block)
       result = execute_query {
-        @socket.write(plain_sql_message(sql))
+        write(plain_sql_message(sql))
         process_query_response()
       }
       block.nil? ? result : yield(result)
@@ -164,6 +166,10 @@ module Pg
       @client_encoding
     end
     
+    def get_copy_data
+      @copy_data.pop()
+    end
+    
     # get_result() → PG::Result 
     # get_result() {|pg_result| block } 
     
@@ -186,8 +192,8 @@ module Pg
     end
     
     def prepare(name, sql, param_type_oids=[])
-      @socket.write(parse_message(name, sql, param_type_oids))
-      @socket.write(sync_message())
+      write(parse_message(name, sql, param_type_oids))
+      write(sync_message())
       
       code = @socket.recv(1)
       puts "Parse response code #{code}"
@@ -201,6 +207,18 @@ module Pg
     
     def protocol_versio
       3
+    end
+    
+    def put_copy_data(buffer)
+      @socket.write(copy_data_message(buffer))
+      true
+    end
+    
+    def put_copy_end()
+      @socket.write(copy_done_message())
+      @copying = false
+      parse_status_params_and_wait_ready_for_query()
+      true
     end
     
     def reset
@@ -266,7 +284,7 @@ module Pg
     
     def execute_query(&block)
       #puts "Executing query #{@query_ready}"
-      if @query_ready
+      if @query_ready || @copying
         @query_ready = false
         yield
       else
@@ -277,16 +295,16 @@ module Pg
     
     def exec_prepared_statement(stmt_name, params = [])
       execute_query {
-        @socket.write(bind_message(stmt_name, params))
+        write(bind_message(stmt_name, params))
         #@socket.write(flush_message())
   #      code = @socket.recv(1)
   #      puts "Bind response code #{code}"      
         
-        @socket.write(describe_portal_message())
+        write(describe_portal_message())
         #puts "Executing query"
-        @socket.write(execute_message())
+        write(execute_message())
         # only sync after sending execute msg  
-        @socket.write(sync_message())
+        write(sync_message())
         
         code = @socket.recv(1)
         puts "Bind response code #{code}"
@@ -321,7 +339,11 @@ module Pg
       when 'C'
         return command_completed()
       # TO BE IMPLEMENTED
-      # CopyInResponse & CopyOutResponse    
+      # CopyInResponse
+      when 'H'
+        return parse_copy_out_response()
+      when 'G'
+        return parse_copy_in_response()
       when 'T'
         return parse_row_description()
       when 'I'
@@ -331,6 +353,8 @@ module Pg
       when 'Z'
         process_ready_for_query()          
       when 'N'
+        return process_notice_response()
+      when 'A'
         return process_notification_response()
       when 't'
         return parameter_description_response()  
@@ -372,27 +396,37 @@ module Pg
       puts "Transaction status after error #{tstatus}"
       @query_ready = true
       @error = Error.new(arr)
-      raise @error
+      raise @error unless @copying
     end
     
-    def process_notification_response
+    def process_notice_response
       len = int32(@socket.recv(4))
       notices = @socket.recv(len-4)
       arr = notices.split(/\x0/)
       puts arr.join(' ')
       process_query_response()
-    end    
+    end
+    
+    def process_notification_response()
+      len = int32(@socket.recv(4))
+      pid = int32(@socket.recv(4))
+      channel_and_payload = @socket.recv(len-8)  
+    end 
     
     def parse_status_params_and_wait_ready_for_query()
       code = @socket.recv(1)
       puts "Status param code #{code}"
       case code
+      when 'C'
+        command_completed()
       when 'T'
         parse_row_description()                
       when 'Z'
         process_ready_for_query()
       when 'N'  
-        process_notification_response()
+        process_notice_response()
+      when 'A'
+        process_notification_response()        
       when 'I'
         empty_query_response()
       when 'E'
@@ -460,10 +494,11 @@ module Pg
       next_code = @socket.recv(1)
       #puts "Next code #{next_code}"
       if(next_code == 'C')
-        status = command_completed()
+        status = command_completed(true)
         puts "Final row count #{row_count}"
         result[:cmd_status] = status
         result[:cmd_rows] = row_count+1
+        result[:result_status] = Result::PGRES_TUPLES_OK
         #puts "result #{result[:rows]}"
         return Result.new(result)
       elsif(next_code == 'D') 
@@ -473,17 +508,59 @@ module Pg
          
     end
     
-    def command_completed()
+    def command_completed(data=false)
       length = int32(@socket.recv(4))
       res = @socket.recv(length-4)
-      puts "Command completed #{res}"
+      #puts "Command completed #{res}"
       parse_status_params_and_wait_ready_for_query()
-      res    
+      return res if data
+      get_empty_result(Result::PGRES_COMMAND_OK)
+    end
+    
+    def parse_copy_out_response()
+      parse_copy_response()
+      
+      @copy_data = []
+      while (chunk = parse_copy_data()) != nil
+        @copy_data << chunk
+      end
+      #puts "Copy data #{data}"
+      parse_status_params_and_wait_ready_for_query()
+      get_empty_result(Result::PGRES_COPY_OUT)
+    end
+    
+    def parse_copy_in_response()
+      parse_copy_response()
+      @copying = true
+      get_empty_result(Result::PGRES_COPY_IN)      
+    end
+    
+    def parse_copy_response
+      length = int32(@socket.recv(4))
+      data_format_code = @socket.recv(1)
+      col_count = int16(@socket.recv(2))
+      col_codes = (0..col_count-1).collect { |cnt|
+        int16(@socket.recv(2))
+      }
+      #puts "Copy data codes #{col_codes}"
+    end
+    
+    def parse_copy_data()
+      code = @socket.recv(1)
+      #puts "Got copy code #{code}"
+      
+      raise "Copy code expected but got #{code}" unless code == 'd' || code == 'c'
+      length = int32(@socket.recv(4))
+      return nil if code == 'c'
+
+      data = @socket.recv(length-4)
+      data
     end
     
     def empty_query_response
       #puts "Got empty query"
       consume_empty_response_and_wait_ready_for_query()
+      get_empty_result(Result::PGRES_EMPTY_QUERY)
     end
     
     def portal_suspended_response
@@ -522,7 +599,24 @@ module Pg
       parse_status_params_and_wait_ready_for_query()
     end
     
-
+    def get_empty_result(status)
+      Result.new({ :fields => [], :rows => [], :result_status => status})
+    end
+    
+    def write(msg)
+      if @copying
+        puts "Copying in progress. Failing it first before new write"
+        fail_copy() 
+      end
+      @socket.write(msg)
+    end
+    
+    def fail_copy
+      @socket.write(copy_fail_message('COPY terminated by new PQexec'))
+      parse_status_params_and_wait_ready_for_query()
+      @copying = false
+    end
+    
 #    def next_response
 #      code = @socket.recv(1)
 #      puts "Next #{code}"
@@ -530,7 +624,7 @@ module Pg
 #      when 'Z'
 #        process_ready_for_query()
 #      when 'N'  
-#        process_notification_response()
+#        process_notice_response()
 #      when 'I'
 #        empty_query_response()
 #      when 'T'

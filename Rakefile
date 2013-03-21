@@ -8,7 +8,7 @@ begin
   task :spec do
     RSpec::Core::RakeTask.new(:spec) do |t|
       t.rspec_opts = spec_opts
-      t.pattern = 'spec/prepared_statement_spec.rb'
+      t.pattern = 'spec/test_spec.rb'
     end
   end
 rescue LoadError

@@ -17,6 +17,7 @@ describe "Postgres Connection" do
     begin
       conn = Pg::Connection.new(@host, @port, nil, nil, @dbname, @user, @password)
       result = conn.exec("select NOW() as when")
+      result.result_status.should == Pg::Result::PGRES_TUPLES_OK
     ensure
       conn.close() unless conn.nil?  
     end
@@ -161,6 +162,17 @@ describe "Postgres Connection" do
       
     ensure
       conn.close unless conn.nil?
+    end  
+  end
+  
+  it "should be able to handle empty query" do
+    
+    begin
+      conn = standard_connection()
+      res = conn.query('')
+      res.result_status.should == Pg::Result::PGRES_EMPTY_QUERY
+    ensure
+      conn.close unless conn.nil? or conn.closed?
     end  
   end  
   

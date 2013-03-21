@@ -1,7 +1,7 @@
 require File.dirname(__FILE__) + '/spec_helper'
 require 'connection'  
 
-describe "Postgres Connection Prepared Statement" do
+describe "Postgres Connection DDL" do
 
   before(:all) do
     @host = 'localhost'
@@ -25,7 +25,8 @@ describe "Postgres Connection Prepared Statement" do
     
     begin
       conn = standard_connection()
-      conn.exec('CREATE DATABASE TEST')
+      res = conn.exec('CREATE DATABASE TEST')
+      res.result_status.should == Pg::Result::PGRES_COMMAND_OK
     ensure
       unless conn.nil?
         conn.exec('DROP DATABASE IF EXISTS TEST')

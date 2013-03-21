@@ -2,6 +2,16 @@ module Pg
   
   class Result
     
+    PGRES_EMPTY_QUERY = 0
+    PGRES_COMMAND_OK = 1
+    PGRES_TUPLES_OK = 2
+    PGRES_COPY_OUT = 3
+    PGRES_COPY_IN = 4
+    PGRES_BAD_RESPONSE =5
+    PGRES_NONFATAL_ERROR = 6
+    PGRES_FATAL_ERROR = 7
+    PGRES_COPY_BOTH = 8
+    
     def initialize(result)
 
 #     @result is an internal map that holds the result
@@ -17,6 +27,7 @@ module Pg
 #          :cmd_status => '',
 #          :cmd_rows => n,   
 #          :error => Error
+#          :result_status => n
 #      }
       @result = result
     end
@@ -170,7 +181,8 @@ module Pg
     end
     
     def result_status
-      raise NotImplementedError("Not implemented yet")
+      @result[:result_status]
+      #raise NotImplementedError("Not implemented yet")
     end
     
     def values
