@@ -2,6 +2,7 @@ require 'binary_converter'
 require 'connection_parser'
 require 'message_generator'
 require 'auth_handler'
+require 'large_object_manager'
 require 'result'
 require 'error'
 require 'char_set'
@@ -9,11 +10,19 @@ require 'socket'
 
 module Pg
   
+  INV_WRITE = 131072
+  INV_READ = 262144
+  
+  SEEK_SET = 0
+  SEEK_CUR = 1
+  SEEK_END = 2
+  
   class Connection
     include BinaryConverter
     include ConnectionParser
     include MessageGenerator
     include AuthHandler
+    include LargeObjectManager
     
     attr_reader :db, :user, :host, :port, :options
     
@@ -235,7 +244,7 @@ module Pg
       begin
         @client_encoding = CharSet.pg_to_ruby(encoding)
       rescue ArgumentError => e
-        raise Error.new('invalid encoding name')
+        raise Error.new('invalid encoding name', self)
       end
     end
     alias_method :client_encoding=, :set_client_encoding
@@ -387,7 +396,7 @@ module Pg
           read = @socket.recv(0)
           puts "Read after error #{read}"
         rescue Exception => e
-          raise Error.new(err)
+          raise Error.new(e, self)
         end
       end
       
@@ -395,7 +404,7 @@ module Pg
       tstatus = @socket.recv(2)
       puts "Transaction status after error #{tstatus}"
       @query_ready = true
-      @error = Error.new(arr)
+      @error = Error.new(arr, self)
       raise @error unless @copying
     end
     

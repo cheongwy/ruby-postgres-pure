@@ -1,9 +1,24 @@
 module Pg
   
   class Error < Exception
-    
-    def initialize(err)
-      @error = err
+
+    attr_reader :result, :connection, :message
+        
+    def initialize(*err)
+      
+      if err[0].is_a?(Array)
+        @error = err[0] 
+        @message = error_field(PGresult::PG_DIAG_MESSAGE_PRIMARY)
+      elsif err[0].is_a?(Exception)
+        @exception = err[0]
+        @message = @exception.message()
+      elsif err[0].is_a?(String)
+        @message = err[0]
+      end
+
+      # set the connection and result object if available      
+      @connection = err[1] if err.size == 2
+      @result = err[2] if err.size == 3
     end
     
     def error_message
@@ -24,11 +39,6 @@ module Pg
       end
     end
      
-    def message
-      error_field(PGresult::PG_DIAG_MESSAGE_PRIMARY)
-    end
-    
-    private
     
   end
   
