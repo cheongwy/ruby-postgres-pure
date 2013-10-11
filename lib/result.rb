@@ -48,6 +48,27 @@ module Pg
       hash
     end   
     
+    def check
+      #raise "Not implemented error"
+      status = result_status
+      begin
+        res_status(status)
+      rescue Exception => e
+        raise "internal error : unknown result status."  
+      end
+      
+      raise "Not fatal error" if status == PGRES_NONFATAL_ERROR
+      # How to check for NON_FATAL_ERROR  
+    end
+    alias_method :check_result, :check
+    
+    #
+    # Clears the result of the query.
+    #
+    def clear
+      @result = nil
+    end
+    
     def cmd_status
       @result[:cmd_status]
     end 
@@ -55,6 +76,7 @@ module Pg
     def cmd_tuples
       @result[:cmd_rows]
     end
+    alias_method :cmdtuples, :cmd_tuples
     
     def column_values(n)
       ensure_column_range(n)
@@ -79,14 +101,30 @@ module Pg
       }
     end
     
+    def each_row
+      fields = @result[:fields]
+      cols = fields.size - 1
+      
+      @result[:rows].each { | row |
+        #puts "#{row[:values]}"
+        list = []
+        (0..cols).each { |i|
+          list.push(row[:values][i])
+        }
+        yield list
+      }
+    end
+    
     def error_field(fieldcode)
       @result[:error].error_field(fieldcode)
     end
+    alias_method :result_error_field, :error_field
     
     def error_message
       @result[:error].error_message
     end
-    
+    alias_method :result_error_message, :error_message
+
     def fields
       @result[:fields].collect { | field |
         field.keys[0]
@@ -166,7 +204,8 @@ module Pg
     def nfields
       @result[:fields].size
     end
-     
+    alias_method :num_fields, :nfields
+ 
     def nparams
       @result[:fields].size
       #raise NotImplementedError("Not implemented yet")
@@ -175,14 +214,22 @@ module Pg
     def ntuples
       @result[:rows].size
     end
-
+    alias_method :num_tuples, :ntuples
+    
+    def oid_value
+      raise "Not implemented error"
+    end
+    
+    def param_type(param_number)
+      raise "Not implemented error"
+    end
+    
     def res_status(status)
-      raise NotImplementedError("Not implemented yet")
+      Result.constants[status]
     end
     
     def result_status
       @result[:result_status]
-      #raise NotImplementedError("Not implemented yet")
     end
     
     def values
@@ -192,13 +239,6 @@ module Pg
       }  
     end
         
-    #
-    # Clears the result of the query.
-    #
-    def clear
-      @result = nil
-    end
-    
     
     private
     
